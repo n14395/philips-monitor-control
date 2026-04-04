@@ -4,6 +4,12 @@ A cross-platform application for controlling Philips monitors over DDC/CI. Adjus
 
 The DDC/CI VCP codes used by this project were reverse-engineered from Philips SmartControl 7.0.0 .NET assemblies. The application wraps [ddcutil](https://www.ddcutil.com/) to communicate with the monitor over I2C.
 
+> **Disclaimer:** This project is **not affiliated with, endorsed by, or associated with Koninklijke Philips N.V. or any of its subsidiaries**. "Philips" and "SmartControl" are trademarks of their respective owners. The DDC/CI VCP codes used here were independently reverse-engineered for interoperability purposes.
+>
+> This software is provided **as-is, with no warranties or guarantees of any kind**, express or implied. The author assumes no responsibility or liability for any damage to hardware, software, or data resulting from the use of this code. **Use it at your own risk.**
+>
+> This project has only been tested on the **Philips BDM4037U**. Behavior on other monitors is unknown and untested — it may not work correctly, or at all, on other models.
+
 ## Features
 
 - **Display settings** — brightness, contrast, color temperature, gamma, SmartImage presets, display scaling
@@ -118,10 +124,3 @@ src/
 
 This project is licensed under the [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html).
 
-## Disclaimer
-
-This project is **not affiliated with, endorsed by, or associated with Koninklijke Philips N.V. or any of its subsidiaries**. "Philips" and "SmartControl" are trademarks of their respective owners. The DDC/CI VCP codes used here were independently reverse-engineered for interoperability purposes.
-
-This software is provided **as-is, with no warranties or guarantees of any kind**, express or implied. The author assumes no responsibility or liability for any damage to hardware, software, or data resulting from the use of this code. **Use it at your own risk.**
-
-This project has only been tested on the **Philips BDM4037U**. Behavior on other monitors is unknown and untested — it may not work correctly, or at all, on other models.
