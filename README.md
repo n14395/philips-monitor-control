@@ -20,15 +20,15 @@ The DDC/CI VCP codes used by this project were reverse-engineered from Philips S
 - **System controls** — power mode, power LED brightness, OSD language, resolution notifier, input auto-detect
 - **Monitor info** — firmware version and display usage time
 - **Factory reset** and **VGA auto-setup** actions
-- **Three interfaces** — GTK4/Libadwaita GUI (Linux), SwiftUI GUI (macOS), and a cross-platform CLI
+- **Three interfaces** — GTK4/Libadwaita GUI (Linux), SwiftUI GUI (macOS), and a Linux CLI
 
 ## Platforms
 
 | Platform | Interface | Toolkit |
 |----------|-----------|---------|
 | Linux    | GUI       | GTK 4 / Libadwaita (Python) |
+| Linux    | CLI       | Python 3 (terminal) |
 | macOS    | GUI       | SwiftUI (Swift) |
-| Any      | CLI       | Python 3 (terminal) |
 
 ## Prerequisites
 
@@ -52,11 +52,6 @@ For running outside of Flatpak:
 - Swift 5.9+ (included with Xcode 15+)
 - [ddcutil](https://www.ddcutil.com/) (install via [Homebrew](https://brew.sh/): `brew install ddcutil`)
 - Optional: `librsvg` (`brew install librsvg`) for app icon generation
-
-### CLI only
-
-- Python 3
-- [ddcutil](https://www.ddcutil.com/)
 
 ## Building
 
@@ -83,12 +78,12 @@ cd src
 
 This compiles the Swift binary, assembles a `.app` bundle, and (on macOS) creates a `.dmg` disk image with a drag-to-Applications layout.
 
-### CLI (no build required)
+### CLI (Linux, no build required)
 
 The CLI can be run directly without building:
 
 ```bash
-cd src
+cd Linux
 ./philips-multiview.py status
 ./philips-multiview.py set brightness 70
 ./philips-multiview.py pip --source hdmi2 --size large --location top-right
@@ -100,11 +95,11 @@ Run `./philips-multiview.py --help` for the full list of commands and options.
 
 ```
 src/
-├── philips-multiview.py           # CLI interface
-├── multiview_ddc.py               # Shared DDC/CI logic and VCP constants
 ├── build-flatpak.sh               # Linux Flatpak build script
 ├── build-macos.sh                 # macOS build script
 ├── Linux/
+│   ├── philips-multiview.py       # CLI interface
+│   ├── multiview_ddc.py           # DDC/CI logic and VCP constants
 │   └── philips-multiview-gtk.py   # GTK4/Libadwaita GUI
 ├── MacOS/
 │   ├── Package.swift              # Swift package manifest

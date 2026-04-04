@@ -45,7 +45,7 @@ modules:
     build-commands:
       # App code
       - install -Dm644 Linux/philips-multiview-gtk.py /app/share/philips-monitor-control/philips-multiview-gtk.py
-      - install -Dm644 multiview_ddc.py /app/share/philips-monitor-control/multiview_ddc.py
+      - install -Dm644 Linux/multiview_ddc.py /app/share/philips-monitor-control/multiview_ddc.py
       # Launcher wrapper
       - |
         printf '#!/bin/sh\nexec python3 /app/share/philips-monitor-control/philips-multiview-gtk.py "$@"\n' \
