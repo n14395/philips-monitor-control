@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.n14395.monitorcontrol</id>
+  <name>Philips Monitor Control</name>
+  <summary>Control Philips monitor settings via DDC/CI</summary>
+  <metadata_license>CC@VERSION@.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      A GTK4/libadwaita application to control Philips monitors over DDC/CI.
+      Adjust brightness, contrast, color temperature, input sources,
+      MultiView (PIP/PBP), audio, and system settings — all without
+      touching the physical OSD buttons.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.n14395.monitorcontrol.desktop</launchable>
+  <content_rating type="oars-1.1" />
+
+  <branding>
+    <color type="primary" scheme_preference="light">#99c1f1</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
+  </branding>
+
+  <releases>
+    <release version="@VERSION@" date="@DATE@" />
+  </releases>
+</component>

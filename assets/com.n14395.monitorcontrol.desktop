@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Philips Monitor Control
+Comment=Control Philips monitor settings via DDC/CI
+Exec=philips-monitor-control
+Icon=com.n14395.monitorcontrol
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;
+Keywords=monitor;display;ddc;philips;multiview;pip;pbp;brightness;
+StartupNotify=true

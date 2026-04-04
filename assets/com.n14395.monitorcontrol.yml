@@ -1,0 +1,62 @@
+app-id: com.n14395.monitorcontrol
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: philips-monitor-control
+
+finish-args:
+  # Display (Wayland + X11 fallback)
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPU rendering
+  - --device=dri
+  # DDC/CI: needs access to /dev/i2c-* devices
+  - --device=all
+  # ddcutil needs to read /sys for i2c device enumeration
+  - --filesystem=/sys:ro
+  # Allow running the host's ddcutil (if i2c-dev in sandbox isn't enough)
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  # jansson — JSON library required by ddcutil
+  - name: jansson
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DJANSSON_BUILD_DOCS=OFF
+      - -DJANSSON_BUILD_SHARED_LIBS=ON
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    sources:
+      - type: archive
+        url: https://github.com/akheron/jansson/releases/download/v2.14/jansson-2.14.tar.gz
+        sha256: 5798d010e41cf8d76b66236cfb2f2543c8d082181d16bc3085ab49538d4b9929
+
+  # ddcutil — built from source so we have it inside the sandbox
+  - name: ddcutil
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://github.com/rockowitz/ddcutil/archive/refs/tags/v2.2.0.tar.gz
+        sha256: 2a9a994b885974423a5b765aaa2c17159f7341881d15f9cb430c0bf1842185ee
+
+  # The application itself
+  - name: philips-monitor-control
+    buildsystem: simple
+    build-commands:
+      # App code
+      - install -Dm644 Linux/philips-multiview-gtk.py /app/share/philips-monitor-control/philips-multiview-gtk.py
+      - install -Dm644 multiview_ddc.py /app/share/philips-monitor-control/multiview_ddc.py
+      # Launcher wrapper
+      - |
+        printf '#!/bin/sh\nexec python3 /app/share/philips-monitor-control/philips-multiview-gtk.py "$@"\n' \
+          > /app/bin/philips-monitor-control
+      - chmod 755 /app/bin/philips-monitor-control
+      # Desktop entry
+      - install -Dm644 assets/com.n14395.monitorcontrol.desktop /app/share/applications/com.n14395.monitorcontrol.desktop
+      # AppStream metainfo
+      - install -Dm644 assets/com.n14395.monitorcontrol.metainfo.xml /app/share/metainfo/com.n14395.monitorcontrol.metainfo.xml
+      # Icon
+      - install -Dm644 assets/com.n14395.monitorcontrol.svg /app/share/icons/hicolor/scalable/apps/com.n14395.monitorcontrol.svg
+    sources:
+      - type: dir
+        path: ..

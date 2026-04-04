@@ -1,0 +1,14 @@
+# Flatpak build artifacts
+.flatpak-builder/
+flatpak-build/
+flatpak-repo/
+*.flatpak
+
+# macOS build artifacts
+MacOS/.build/
+*.app/
+*.dmg
+
+# Python
+__pycache__/
+*.pyc
