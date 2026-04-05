@@ -2,7 +2,7 @@
 
 A cross-platform application for controlling Philips monitors over DDC/CI. Adjust brightness, contrast, color temperature, input sources, MultiView (PIP/PBP), audio, and system settings — all from software, without touching the physical OSD buttons.
 
-The DDC/CI VCP codes used by this project were reverse-engineered from Philips SmartControl 7.0.0 .NET assemblies. The application wraps [ddcutil](https://www.ddcutil.com/) to communicate with the monitor over I2C.
+The DDC/CI VCP codes used by this project were reverse-engineered from Philips SmartControl 7.0.0 .NET assemblies. On Linux the application wraps [ddcutil](https://www.ddcutil.com/) to communicate with the monitor over I2C; on macOS it uses native IOKit APIs for direct DDC/CI access.
 
 > **Disclaimer:** This project is **not affiliated with, endorsed by, or associated with Koninklijke Philips N.V. or any of its subsidiaries**. "Philips" and "SmartControl" are trademarks of their respective owners. The DDC/CI VCP codes used here were independently reverse-engineered for interoperability purposes.
 >
@@ -48,10 +48,11 @@ For running outside of Flatpak:
 
 ### macOS
 
-- macOS 13 (Ventura) or later
+- Apple Silicon Mac (M1 or later)
+- macOS 14 (Sonoma) or later
 - Swift 5.9+ (included with Xcode 15+)
-- [ddcutil](https://www.ddcutil.com/) (install via [Homebrew](https://brew.sh/): `brew install ddcutil`)
 - Optional: `librsvg` (`brew install librsvg`) for app icon generation
+- **Important:** The built-in HDMI port on M1 and entry-level M2 Macs does not support DDC/CI. Connect your monitor via **USB-C** (DisplayPort Alt Mode) or a USB-C to DisplayPort/HDMI adapter instead.
 
 ## Building
 

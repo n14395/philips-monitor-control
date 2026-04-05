@@ -1,4 +1,5 @@
 import Foundation
+import IOKit
 
 // MARK: - VCP Code Constants
 
@@ -205,93 +206,186 @@ struct MonitorStatus {
     var firmwareVersion: String?; var usageTime: String?
 }
 
-// MARK: - DDCUtil Wrapper
+// MARK: - Native DDC/CI via IOAVService (Apple Silicon)
 
-final class DDCUtilWrapper: @unchecked Sendable {
-    var bus: Int?
+@_silgen_name("IOAVServiceCreateWithService")
+private func _IOAVServiceCreateWithService(
+    _ allocator: CFAllocator?, _ service: io_service_t
+) -> Unmanaged<CFTypeRef>?
+
+@_silgen_name("IOAVServiceReadI2C")
+private func _IOAVServiceReadI2C(
+    _ service: CFTypeRef, _ chipAddress: UInt32, _ offset: UInt32,
+    _ outputBuffer: UnsafeMutablePointer<UInt8>, _ outputBufferSize: UInt32
+) -> IOReturn
+
+@_silgen_name("IOAVServiceWriteI2C")
+private func _IOAVServiceWriteI2C(
+    _ service: CFTypeRef, _ chipAddress: UInt32, _ dataAddress: UInt32,
+    _ inputBuffer: UnsafeMutablePointer<UInt8>, _ inputBufferSize: UInt32
+) -> IOReturn
+
+struct DisplayInfo: Identifiable, Hashable {
+    let index: Int
+    let name: String
+    let isBuiltIn: Bool
+    var id: Int { index }
+}
+
+final class NativeDDC: @unchecked Sendable {
+    /// I2C chip address for DDC/CI destination (monitor)
+    private static let chipAddr: UInt32 = 0x37
+    /// DDC/CI host (source) address
+    private static let hostAddr: UInt8 = 0x51
+    /// DDC/CI destination address (chip address << 1)
+    private static let destAddr: UInt8 = 0x6E
+
+    var displayIndex: Int {
+        didSet { if displayIndex != oldValue { cachedService = nil } }
+    }
     var lastError: String?
 
-    init(bus: Int? = nil) { self.bus = bus }
+    private var cachedService: CFTypeRef?
 
-    private func baseArgs() -> [String] {
-        var args = ["ddcutil"]
-        if let bus = bus { args += ["--bus", String(bus)] }
-        return args
+    init(displayIndex: Int = 0) { self.displayIndex = displayIndex }
+
+    /// Enumerate available displays and identify built-in vs external.
+    static func enumerateDisplays() -> [DisplayInfo] {
+        var results: [DisplayInfo] = []
+        var iterator = io_iterator_t()
+        guard let matching = IOServiceMatching("DCPAVServiceProxy") else { return results }
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == kIOReturnSuccess else { return results }
+        defer { IOObjectRelease(iterator) }
+
+        var index = 0
+        while case let svc = IOIteratorNext(iterator), svc != IO_OBJECT_NULL {
+            defer { IOObjectRelease(svc) }
+            let builtIn = isBuiltInDisplay(svc)
+            let name = builtIn ? "Built-in Display" : "External Display"
+            results.append(DisplayInfo(index: index, name: name, isBuiltIn: builtIn))
+            index += 1
+        }
+        return results
     }
 
-    static func isAvailable() -> Bool {
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        p.arguments = ["which", "ddcutil"]
-        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        try? p.run(); p.waitUntilExit()
-        return p.terminationStatus == 0
+    private static func isBuiltInDisplay(_ service: io_service_t) -> Bool {
+        // Check the service and its ancestors for built-in indicators
+        let propertyNames = ["IOFBBuiltIn", "built-in", "AAPL,boot-display"]
+        for prop in propertyNames {
+            if let val = IORegistryEntrySearchCFProperty(
+                service, kIOServicePlane, prop as CFString,
+                kCFAllocatorDefault,
+                IOOptionBits(kIORegistryIterateParents | kIORegistryIterateRecursively)
+            ) {
+                // Property exists — if it's a boolean/number, check its value
+                if let num = val as? NSNumber { return num.boolValue }
+                return true // property presence alone indicates built-in
+            }
+        }
+        return false
     }
 
     func getVCP(_ code: UInt8) -> VCPRaw? {
         lastError = nil
-        let args = baseArgs() + ["getvcp", String(format: "0x%02x", code), "--verbose"]
-        let (stdout, stderr, status) = runProcess(args)
-        guard status == 0 else { lastError = stderr; return nil }
+        guard let service = service() else { return nil }
 
-        let output = stdout + stderr
-        let pattern = #"mh=0x([0-9a-fA-F]{2}),\s*ml=0x([0-9a-fA-F]{2}),\s*sh=0x([0-9a-fA-F]{2}),\s*sl=0x([0-9a-fA-F]{2})"#
-        if let match = output.range(of: pattern, options: .regularExpression) {
-            let sub = String(output[match])
-            let hexValues = sub.components(separatedBy: CharacterSet(charactersIn: "=, "))
-                .filter { $0.hasPrefix("0x") }
-                .compactMap { UInt8($0.dropFirst(2), radix: 16) }
-            if hexValues.count == 4 {
-                return VCPRaw(mh: hexValues[0], ml: hexValues[1], sh: hexValues[2], sl: hexValues[3])
-            }
+        // DDC/CI Get VCP Feature request: [length|0x80, opcode=0x01, vcp_code, checksum]
+        var payload: [UInt8] = [0x82, 0x01, code]
+        payload.append(Self.checksum(payload))
+
+        guard _IOAVServiceWriteI2C(service, Self.chipAddr, UInt32(Self.hostAddr),
+                                   &payload, UInt32(payload.count)) == kIOReturnSuccess else {
+            lastError = "DDC write failed for VCP 0x\(String(format: "%02X", code))"; return nil
         }
 
-        let fallback = #"current value\s*=\s*(\d+),\s*max value\s*=\s*(\d+)"#
-        if let match = output.range(of: fallback, options: .regularExpression) {
-            let sub = String(output[match])
-            let nums = sub.components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap { UInt16($0) }
-            if nums.count >= 2 {
-                return VCPRaw(mh: UInt8((nums[1] >> 8) & 0xFF), ml: UInt8(nums[1] & 0xFF),
-                              sh: UInt8((nums[0] >> 8) & 0xFF), sl: UInt8(nums[0] & 0xFF))
-            }
+        usleep(40_000) // 40 ms for the monitor to prepare its reply
+
+        // DDC/CI Get VCP Feature Reply: 11 bytes
+        // [0]=length|0x80  [1]=opcode(0x02)  [2]=result  [3]=vcp_code
+        // [4]=type_hi  [5]=type_lo  [6]=max_hi  [7]=max_lo
+        // [8]=cur_hi   [9]=cur_lo   [10]=checksum
+        var resp = [UInt8](repeating: 0, count: 11)
+        guard _IOAVServiceReadI2C(service, Self.chipAddr, UInt32(Self.hostAddr),
+                                  &resp, UInt32(resp.count)) == kIOReturnSuccess else {
+            lastError = "DDC read failed for VCP 0x\(String(format: "%02X", code))"; return nil
         }
-        lastError = "Could not parse getvcp output"; return nil
+
+        guard resp[1] == 0x02 else {
+            lastError = "Unexpected DDC reply opcode 0x\(String(format: "%02X", resp[1]))"; return nil
+        }
+        guard resp[2] == 0x00 else {
+            lastError = "VCP 0x\(String(format: "%02X", code)) unsupported (result=\(resp[2]))"; return nil
+        }
+
+        return VCPRaw(mh: resp[6], ml: resp[7], sh: resp[8], sl: resp[9])
     }
 
     @discardableResult
     func setVCP(_ code: UInt8, value: UInt16) -> Bool {
         lastError = nil
-        let args = baseArgs() + ["setvcp", String(format: "0x%02x", code), String(format: "0x%04x", value), "--noverify"]
-        let (_, stderr, status) = runProcess(args)
-        if status != 0 { lastError = stderr; return false }
+        guard let service = service() else { return false }
+
+        // DDC/CI Set VCP Feature: [length|0x80, opcode=0x03, vcp_code, value_hi, value_lo, checksum]
+        var payload: [UInt8] = [0x84, 0x03, code, UInt8(value >> 8), UInt8(value & 0xFF)]
+        payload.append(Self.checksum(payload))
+
+        guard _IOAVServiceWriteI2C(service, Self.chipAddr, UInt32(Self.hostAddr),
+                                   &payload, UInt32(payload.count)) == kIOReturnSuccess else {
+            lastError = "DDC write failed for VCP 0x\(String(format: "%02X", code))"; return false
+        }
         return true
     }
 
     func sleep() { Thread.sleep(forTimeInterval: 0.15) }
 
-    private func runProcess(_ arguments: [String]) -> (String, String, Int32) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = arguments
-        let stdoutPipe = Pipe(); let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe; process.standardError = stderrPipe
-        do { try process.run() }
-        catch { return ("", error.localizedDescription, 1) }
-        // Read pipes before waitUntilExit to avoid deadlock when output exceeds pipe buffer
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-        return (stdout, stderr, process.terminationStatus)
+    /// Invalidate the cached IOAVService handle (e.g. after a display reconnect).
+    func invalidate() { cachedService = nil }
+
+    // MARK: - Private
+
+    private static func checksum(_ payload: [UInt8]) -> UInt8 {
+        var xor: UInt8 = destAddr ^ hostAddr
+        for b in payload { xor ^= b }
+        return xor
+    }
+
+    private func service() -> CFTypeRef? {
+        if let cached = cachedService { return cached }
+
+        var iterator = io_iterator_t()
+        guard let matching = IOServiceMatching("DCPAVServiceProxy") else {
+            lastError = "Could not create IOService matching dictionary"; return nil
+        }
+        let kr = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
+        guard kr == kIOReturnSuccess else {
+            lastError = "No displays found (0x\(String(format: "%08X", kr)))"; return nil
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var index = 0
+        while case let svc = IOIteratorNext(iterator), svc != IO_OBJECT_NULL {
+            defer { IOObjectRelease(svc) }
+            if index == displayIndex {
+                guard let av = _IOAVServiceCreateWithService(kCFAllocatorDefault, svc) else {
+                    lastError = "Failed to open IOAVService for display \(index)"; return nil
+                }
+                let ref = av.takeRetainedValue()
+                cachedService = ref
+                return ref
+            }
+            index += 1
+        }
+
+        lastError = "Display \(displayIndex) not found (\(index) available)"; return nil
     }
 }
 
 // MARK: - Controller
 
 final class MultiViewController: @unchecked Sendable {
-    let ddc: DDCUtilWrapper
+    let ddc: NativeDDC
 
-    init(ddc: DDCUtilWrapper) { self.ddc = ddc }
+    init(ddc: NativeDDC) { self.ddc = ddc }
 
     func getFullStatus() -> MonitorStatus {
         var s = MonitorStatus()

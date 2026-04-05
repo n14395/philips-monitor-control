@@ -47,16 +47,26 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
     // UI state
     @Published var statusMessage: String = "Ready"
     @Published var isBusy: Bool = false
-    @Published var busText: String = ""
+    @Published var displays: [DisplayInfo] = []
+    @Published var selectedDisplayIndex: Int = 0
+    private var suppressOnChange: Bool = false
 
-    nonisolated(unsafe) private var ddc: DDCUtilWrapper
+    nonisolated(unsafe) private var ddc: NativeDDC
     nonisolated(unsafe) private var ctrl: MultiViewController
 
     init() {
-        let d = DDCUtilWrapper(); self.ddc = d; self.ctrl = MultiViewController(ddc: d)
+        let d = NativeDDC(); self.ddc = d; self.ctrl = MultiViewController(ddc: d)
+        let found = NativeDDC.enumerateDisplays()
+        self.displays = found
+        // Default to the first external display
+        if let ext = found.first(where: { !$0.isBuiltIn }) {
+            self.selectedDisplayIndex = ext.index
+        } else if let last = found.last {
+            self.selectedDisplayIndex = last.index
+        }
     }
 
-    private func updateBus() { ddc.bus = Int(busText) }
+    private func updateDisplay() { ddc.displayIndex = selectedDisplayIndex }
 
     // MARK: Refresh
 
@@ -66,7 +76,7 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
 
         Task.detached { [weak self] in
             guard let self else { return }
-            await MainActor.run { self.updateBus() }
+            await MainActor.run { self.updateDisplay() }
             let status = self.ctrl.getFullStatus()
             await MainActor.run {
                 self.applyStatus(status)
@@ -77,6 +87,8 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func applyStatus(_ s: MonitorStatus) {
+        suppressOnChange = true
+        defer { suppressOnChange = false }
         // MultiView
         if let m = s.mode { statusMode = m.label; mode = m }
         else if let raw = s.modeRaw { statusMode = String(format: "0x%04x", raw) }
@@ -107,25 +119,15 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
 
     // MARK: Apply actions
 
-    func applyPicture() {
-        runAsync("Applying picture...") { [self] in
-            ctrl.setContinuous(VCP.brightness, Int(await get(\.brightness)))
-            ctrl.setContinuous(VCP.contrast, Int(await get(\.contrast)))
-            ctrl.setEnum(VCP.colorTemp, await get(\.colorTemp).rawValue)
-            ctrl.setEnum(VCP.gamma, await get(\.gamma).rawValue)
-            ctrl.setEnum(VCP.smartImage, await get(\.smartImage).rawValue)
-            ctrl.setEnum(VCP.scaling, await get(\.scaling).rawValue)
-            ctrl.setContinuous(VCP.redGain, Int(await get(\.redGain)))
-            ctrl.setContinuous(VCP.greenGain, Int(await get(\.greenGain)))
-            ctrl.setContinuous(VCP.blueGain, Int(await get(\.blueGain)))
-        }
+    /// Send a single VCP value without a full status refresh.
+    func sendContinuous(_ code: UInt8, _ value: Int) {
+        guard !suppressOnChange else { return }
+        sendSingle("Setting \(code)...") { [self] in ctrl.setContinuous(code, value) }
     }
 
-    func applyAudio() {
-        runAsync("Applying audio...") { [self] in
-            ctrl.setContinuous(VCP.volume, Int(await get(\.volume)))
-            ctrl.setEnum(VCP.audioMute, await get(\.mute).rawValue)
-        }
+    func sendEnum(_ code: UInt8, _ value: UInt8) {
+        guard !suppressOnChange else { return }
+        sendSingle("Setting \(code)...") { [self] in ctrl.setEnum(code, value) }
     }
 
     func applyInput() {
@@ -168,12 +170,20 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
         await MainActor.run { self[keyPath: kp] }
     }
 
+    private func sendSingle(_ msg: String, _ work: @Sendable @escaping () -> Void) {
+        Task.detached { [weak self] in
+            guard let self else { return }
+            await MainActor.run { self.updateDisplay() }
+            work()
+        }
+    }
+
     private func runAsync(_ msg: String, _ work: @Sendable @escaping () async -> Void) {
         guard !isBusy else { return }
         isBusy = true; statusMessage = msg
         Task.detached { [weak self] in
             guard let self else { return }
-            await MainActor.run { self.updateBus() }
+            await MainActor.run { self.updateDisplay() }
             await work()
             Thread.sleep(forTimeInterval: 0.2)
             let status = self.ctrl.getFullStatus()
@@ -227,10 +237,12 @@ struct ContentView: View {
                     .disabled(vm.isBusy)
                 Text(vm.statusMessage).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                TextField("Bus", text: $vm.busText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 60)
-                    .help("I2C bus number (blank = auto)")
+                Picker("Display", selection: $vm.selectedDisplayIndex) {
+                    ForEach(vm.displays) { d in
+                        Text("\(d.name) (\(d.index))").tag(d.index)
+                    }
+                }
+                .frame(maxWidth: 200)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
@@ -247,39 +259,39 @@ struct PictureTab: View {
     var body: some View {
         Form {
             Section("Display") {
-                SliderRow(label: "Brightness", value: $vm.brightness, range: 0...100)
-                SliderRow(label: "Contrast", value: $vm.contrast, range: 0...100)
+                SliderRow(label: "Brightness", value: $vm.brightness, range: 0...100,
+                          onCommit: { vm.sendContinuous(VCP.brightness, Int(vm.brightness)) })
+                SliderRow(label: "Contrast", value: $vm.contrast, range: 0...100,
+                          onCommit: { vm.sendContinuous(VCP.contrast, Int(vm.contrast)) })
             }
             Section("Color") {
                 Picker("Color Temperature", selection: $vm.colorTemp) {
                     ForEach(ColorTemp.allCases) { t in Text(t.label).tag(t) }
                 }
+                .onChange(of: vm.colorTemp) { vm.sendEnum(VCP.colorTemp, $1.rawValue) }
                 Picker("Gamma", selection: $vm.gamma) {
                     ForEach(GammaPreset.allCases) { g in Text(g.label).tag(g) }
                 }
+                .onChange(of: vm.gamma) { vm.sendEnum(VCP.gamma, $1.rawValue) }
                 Picker("SmartImage", selection: $vm.smartImage) {
                     ForEach(SmartImagePreset.allCases) { s in Text(s.label).tag(s) }
                 }
+                .onChange(of: vm.smartImage) { vm.sendEnum(VCP.smartImage, $1.rawValue) }
                 Picker("Scaling", selection: $vm.scaling) {
                     ForEach(DisplayScaling.allCases) { s in Text(s.label).tag(s) }
                 }
+                .onChange(of: vm.scaling) { vm.sendEnum(VCP.scaling, $1.rawValue) }
             }
             Section("RGB Gains") {
-                SliderRow(label: "Red", value: $vm.redGain, range: 0...100, tint: .red)
-                SliderRow(label: "Green", value: $vm.greenGain, range: 0...100, tint: .green)
-                SliderRow(label: "Blue", value: $vm.blueGain, range: 0...100, tint: .blue)
+                SliderRow(label: "Red", value: $vm.redGain, range: 0...100, tint: .red,
+                          onCommit: { vm.sendContinuous(VCP.redGain, Int(vm.redGain)) })
+                SliderRow(label: "Green", value: $vm.greenGain, range: 0...100, tint: .green,
+                          onCommit: { vm.sendContinuous(VCP.greenGain, Int(vm.greenGain)) })
+                SliderRow(label: "Blue", value: $vm.blueGain, range: 0...100, tint: .blue,
+                          onCommit: { vm.sendContinuous(VCP.blueGain, Int(vm.blueGain)) })
             }
         }
         .formStyle(.grouped)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Spacer()
-                Button("Apply Picture") { vm.applyPicture() }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return)
-            }
-            .padding()
-        }
     }
 }
 
@@ -291,21 +303,15 @@ struct AudioTab: View {
     var body: some View {
         Form {
             Section("Audio") {
-                SliderRow(label: "Volume", value: $vm.volume, range: 0...100)
+                SliderRow(label: "Volume", value: $vm.volume, range: 0...100,
+                          onCommit: { vm.sendContinuous(VCP.volume, Int(vm.volume)) })
                 Picker("Mute", selection: $vm.mute) {
                     ForEach(AudioMuteState.allCases) { m in Text(m.label).tag(m) }
                 }
+                .onChange(of: vm.mute) { vm.sendEnum(VCP.audioMute, $1.rawValue) }
             }
         }
         .formStyle(.grouped)
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Spacer()
-                Button("Apply Audio") { vm.applyAudio() }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding()
-        }
     }
 }
 
@@ -431,13 +437,16 @@ struct SliderRow: View {
     var range: ClosedRange<Double> = 0...100
     var step: Double = 1
     var tint: Color? = nil
+    var onCommit: (() -> Void)? = nil
 
     var body: some View {
         HStack {
             Text(label)
                 .frame(width: 80, alignment: .leading)
-            Slider(value: $value, in: range, step: step)
-                .tint(tint)
+            Slider(value: $value, in: range, step: step) { editing in
+                if !editing { onCommit?() }
+            }
+            .tint(tint)
             Text("\(Int(value))")
                 .frame(width: 30, alignment: .trailing)
                 .monospacedDigit()
