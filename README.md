@@ -59,7 +59,6 @@ For running outside of Flatpak:
 ### Linux (Flatpak)
 
 ```bash
-cd src
 ./build-flatpak.sh 1.0.0
 ```
 
@@ -73,7 +72,6 @@ flatpak run com.n14395.monitorcontrol
 ### macOS
 
 ```bash
-cd src
 ./build-macos.sh 1.0.0
 ```
 
