@@ -58,11 +58,8 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
         let d = NativeDDC(); self.ddc = d; self.ctrl = MultiViewController(ddc: d)
         let found = NativeDDC.enumerateDisplays()
         self.displays = found
-        // Default to the first external display
-        if let ext = found.first(where: { !$0.isBuiltIn }) {
-            self.selectedDisplayIndex = ext.index
-        } else if let last = found.last {
-            self.selectedDisplayIndex = last.index
+        if let first = found.first {
+            self.selectedDisplayIndex = first.index
         }
     }
 

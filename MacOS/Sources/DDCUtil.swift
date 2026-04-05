@@ -213,6 +213,11 @@ private func _IOAVServiceCreateWithService(
     _ allocator: CFAllocator?, _ service: io_service_t
 ) -> Unmanaged<CFTypeRef>?
 
+@_silgen_name("IOAVServiceCopyEDID")
+private func _IOAVServiceCopyEDID(
+    _ service: CFTypeRef, _ edidOut: UnsafeMutablePointer<Unmanaged<CFData>?>
+) -> IOReturn
+
 @_silgen_name("IOAVServiceReadI2C")
 private func _IOAVServiceReadI2C(
     _ service: CFTypeRef, _ chipAddress: UInt32, _ offset: UInt32,
@@ -228,7 +233,6 @@ private func _IOAVServiceWriteI2C(
 struct DisplayInfo: Identifiable, Hashable {
     let index: Int
     let name: String
-    let isBuiltIn: Bool
     var id: Int { index }
 }
 
@@ -249,7 +253,8 @@ final class NativeDDC: @unchecked Sendable {
 
     init(displayIndex: Int = 0) { self.displayIndex = displayIndex }
 
-    /// Enumerate available displays and identify built-in vs external.
+    /// Enumerate available displays, using EDID to identify and name them.
+    /// Displays whose EDID cannot be read (e.g. the built-in display) are excluded.
     static func enumerateDisplays() -> [DisplayInfo] {
         var results: [DisplayInfo] = []
         var iterator = io_iterator_t()
@@ -260,29 +265,36 @@ final class NativeDDC: @unchecked Sendable {
         var index = 0
         while case let svc = IOIteratorNext(iterator), svc != IO_OBJECT_NULL {
             defer { IOObjectRelease(svc) }
-            let builtIn = isBuiltInDisplay(svc)
-            let name = builtIn ? "Built-in Display" : "External Display"
-            results.append(DisplayInfo(index: index, name: name, isBuiltIn: builtIn))
+            guard let av = _IOAVServiceCreateWithService(kCFAllocatorDefault, svc) else {
+                index += 1; continue
+            }
+            let avRef = av.takeRetainedValue()
+
+            // Try reading the EDID — built-in displays fail this call
+            var edidRef: Unmanaged<CFData>? = nil
+            let kr = _IOAVServiceCopyEDID(avRef, &edidRef)
+            guard kr == kIOReturnSuccess, let data = edidRef?.takeRetainedValue() as Data? else {
+                index += 1; continue
+            }
+
+            let name = edidDisplayName([UInt8](data)) ?? "External Display"
+            results.append(DisplayInfo(index: index, name: name))
             index += 1
         }
         return results
     }
 
-    private static func isBuiltInDisplay(_ service: io_service_t) -> Bool {
-        // Check the service and its ancestors for built-in indicators
-        let propertyNames = ["IOFBBuiltIn", "built-in", "AAPL,boot-display"]
-        for prop in propertyNames {
-            if let val = IORegistryEntrySearchCFProperty(
-                service, kIOServicePlane, prop as CFString,
-                kCFAllocatorDefault,
-                IOOptionBits(kIORegistryIterateParents | kIORegistryIterateRecursively)
-            ) {
-                // Property exists — if it's a boolean/number, check its value
-                if let num = val as? NSNumber { return num.boolValue }
-                return true // property presence alone indicates built-in
+    /// Extract the monitor name from an EDID blob.
+    private static func edidDisplayName(_ edid: [UInt8]) -> String? {
+        for base in stride(from: 54, through: 108, by: 18) {
+            guard base + 17 < edid.count else { break }
+            if edid[base] == 0 && edid[base+1] == 0 && edid[base+2] == 0 && edid[base+3] == 0xFC {
+                let nameBytes = edid[(base+5)...(base+17)]
+                return String(bytes: nameBytes, encoding: .ascii)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        return false
+        return nil
     }
 
     func getVCP(_ code: UInt8) -> VCPRaw? {
@@ -300,24 +312,42 @@ final class NativeDDC: @unchecked Sendable {
 
         usleep(40_000) // 40 ms for the monitor to prepare its reply
 
-        // DDC/CI Get VCP Feature Reply: 11 bytes
-        // [0]=length|0x80  [1]=opcode(0x02)  [2]=result  [3]=vcp_code
-        // [4]=type_hi  [5]=type_lo  [6]=max_hi  [7]=max_lo
-        // [8]=cur_hi   [9]=cur_lo   [10]=checksum
-        var resp = [UInt8](repeating: 0, count: 11)
+        // Read 12 bytes to accommodate both response formats:
+        // Without source addr prefix: [0]=length|0x80  [1]=opcode  ...  [9]=cur_lo  [10]=checksum
+        // With source addr prefix:    [0]=0x6E  [1]=length|0x80  [2]=opcode  ...  [10]=cur_lo  [11]=checksum
+        var resp = [UInt8](repeating: 0, count: 12)
         guard _IOAVServiceReadI2C(service, Self.chipAddr, UInt32(Self.hostAddr),
                                   &resp, UInt32(resp.count)) == kIOReturnSuccess else {
             lastError = "DDC read failed for VCP 0x\(String(format: "%02X", code))"; return nil
         }
 
-        guard resp[1] == 0x02 else {
-            lastError = "Unexpected DDC reply opcode 0x\(String(format: "%02X", resp[1]))"; return nil
-        }
-        guard resp[2] == 0x00 else {
-            lastError = "VCP 0x\(String(format: "%02X", code)) unsupported (result=\(resp[2]))"; return nil
+        // Determine the start of the DDC reply: some connections prefix with source address (0x6E)
+        let off: Int
+        if resp[0] == Self.destAddr && resp[2] == 0x02 { off = 1 }
+        else if resp[1] == 0x02 { off = 0 }
+        else {
+            let hex = resp.prefix(4).map { String(format: "%02X", $0) }.joined(separator: " ")
+            lastError = "Unexpected DDC reply for VCP 0x\(String(format: "%02X", code)): \(hex)"; return nil
         }
 
-        return VCPRaw(mh: resp[6], ml: resp[7], sh: resp[8], sl: resp[9])
+        guard resp[off + 1] == 0x02 else {
+            lastError = "Unexpected DDC reply opcode 0x\(String(format: "%02X", resp[off + 1]))"; return nil
+        }
+        guard resp[off + 2] == 0x00 else {
+            lastError = "VCP 0x\(String(format: "%02X", code)) unsupported (result=\(resp[off + 2]))"; return nil
+        }
+
+        // Parse max and current values from the end of the data block.
+        // The length byte encodes the number of following data bytes (excluding checksum).
+        // Current and max are always the last 4 bytes of the data, regardless of type field width.
+        let dataLen = Int(resp[off] & 0x7F)
+        let dataEnd = off + 1 + dataLen  // index past last data byte (= checksum position)
+        guard dataEnd >= off + 5 else {
+            lastError = "DDC reply too short for VCP 0x\(String(format: "%02X", code))"; return nil
+        }
+
+        return VCPRaw(mh: resp[dataEnd - 4], ml: resp[dataEnd - 3],
+                      sh: resp[dataEnd - 2], sl: resp[dataEnd - 1])
     }
 
     @discardableResult
