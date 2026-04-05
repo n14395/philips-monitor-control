@@ -30,6 +30,15 @@ The DDC/CI VCP codes used by this project were reverse-engineered from Philips S
 | Linux    | CLI       | Python 3 (terminal) |
 | macOS    | GUI       | SwiftUI (Swift) |
 
+## Installation
+
+The easiest way to install is to grab a pre-built package from the [GitHub Releases](https://github.com/n14395/philips-monitor-control/releases) page:
+
+- **Linux** — download the `.flatpak` bundle, then install with `flatpak install --user <file>.flatpak`
+- **macOS** — download the `.dmg`, open it, and drag the app to Applications
+
+To build from source instead, see the sections below.
+
 ## Prerequisites
 
 ### Linux
