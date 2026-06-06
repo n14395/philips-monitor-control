@@ -1,5 +1,6 @@
 import Foundation
 import IOKit
+import Darwin
 
 // MARK: - VCP Code Constants
 
@@ -233,6 +234,7 @@ private func _IOAVServiceWriteI2C(
 struct DisplayInfo: Identifiable, Hashable {
     let index: Int
     let name: String
+    let connectionWarning: String?
     var id: Int { index }
 }
 
@@ -257,6 +259,7 @@ final class NativeDDC: @unchecked Sendable {
     /// Displays whose EDID cannot be read (e.g. the built-in display) are excluded.
     static func enumerateDisplays() -> [DisplayInfo] {
         var results: [DisplayInfo] = []
+        let builtInHDMIEDIDs = affectedBuiltInHDMIEDIDs()
         var iterator = io_iterator_t()
         guard let matching = IOServiceMatching("DCPAVServiceProxy") else { return results }
         guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == kIOReturnSuccess else { return results }
@@ -278,10 +281,97 @@ final class NativeDDC: @unchecked Sendable {
             }
 
             let name = edidDisplayName([UInt8](data)) ?? "External Display"
-            results.append(DisplayInfo(index: index, name: name))
+            let warning = builtInHDMIEDIDs.contains { edidMatches(data, $0) }
+                ? builtInHDMIWarning
+                : nil
+            results.append(DisplayInfo(index: index, name: name, connectionWarning: warning))
             index += 1
         }
         return results
+    }
+
+    private static let builtInHDMIWarning = "DDC/CI is not supported over this Mac's built-in HDMI port. Connect via USB-C/DisplayPort or a USB-C adapter instead."
+
+    private static let affectedBuiltInHDMIModels: Set<String> = [
+        "Macmini9,1",    // Mac mini (M1, 2020)
+        "Mac13,1",       // Mac Studio (M1 Max, 2022)
+        "Mac13,2",       // Mac Studio (M1 Ultra, 2022)
+        "Mac14,3",       // Mac mini (M2, 2023)
+        "MacBookPro18,1", "MacBookPro18,2", "MacBookPro18,3", "MacBookPro18,4",
+    ]
+
+    private static func affectedBuiltInHDMIEDIDs() -> [Data] {
+        guard let model = modelIdentifier(), affectedBuiltInHDMIModels.contains(model) else { return [] }
+
+        var results: [Data] = []
+        var iterator = io_iterator_t()
+        guard let matching = IOServiceMatching("IOPortTransportStateDisplayPort") else { return results }
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == kIOReturnSuccess else { return results }
+        defer { IOObjectRelease(iterator) }
+
+        while case let svc = IOIteratorNext(iterator), svc != IO_OBJECT_NULL {
+            defer { IOObjectRelease(svc) }
+            guard registryBool(svc, "Active") == true,
+                  registryBool(svc, "ParentPortBuiltIn") == true,
+                  isBuiltInHDMITransport(svc),
+                  let edid = registryData(svc, "EDID") else { continue }
+            results.append(edid)
+        }
+        return results
+    }
+
+    private static func isBuiltInHDMITransport(_ service: io_service_t) -> Bool {
+        registryString(service, "ParentBuiltInPortTypeDescription") == "HDMI"
+            || registryInt(service, "ParentBuiltInPortType") == 6
+            || registryInt(service, "ParentPortType") == 6
+    }
+
+    private static func modelIdentifier() -> String? {
+        var size = 0
+        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var value = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.model", &value, &size, nil, 0) == 0 else { return nil }
+        return String(cString: value)
+    }
+
+    private static func registryProperty(_ entry: io_registry_entry_t, _ key: String) -> Any? {
+        IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+    }
+
+    private static func registryString(_ entry: io_registry_entry_t, _ key: String) -> String? {
+        registryProperty(entry, key) as? String
+    }
+
+    private static func registryData(_ entry: io_registry_entry_t, _ key: String) -> Data? {
+        registryProperty(entry, key) as? Data
+    }
+
+    private static func registryBool(_ entry: io_registry_entry_t, _ key: String) -> Bool? {
+        switch registryProperty(entry, key) {
+        case let value as Bool:
+            return value
+        case let value as NSNumber:
+            return value.boolValue
+        default:
+            return nil
+        }
+    }
+
+    private static func registryInt(_ entry: io_registry_entry_t, _ key: String) -> Int? {
+        switch registryProperty(entry, key) {
+        case let value as Int:
+            return value
+        case let value as NSNumber:
+            return value.intValue
+        default:
+            return nil
+        }
+    }
+
+    private static func edidMatches(_ lhs: Data, _ rhs: Data) -> Bool {
+        if lhs == rhs { return true }
+        guard lhs.count >= 128, rhs.count >= 128 else { return false }
+        return lhs.prefix(128).elementsEqual(rhs.prefix(128))
     }
 
     /// Extract the monitor name from an EDID blob.

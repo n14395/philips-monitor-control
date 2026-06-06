@@ -51,6 +51,10 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
     @Published var selectedDisplayIndex: Int = 0
     private var suppressOnChange: Bool = false
 
+    var selectedDisplayWarning: String? {
+        displays.first { $0.index == selectedDisplayIndex }?.connectionWarning
+    }
+
     nonisolated(unsafe) private var ddc: NativeDDC
     nonisolated(unsafe) private var ctrl: MultiViewController
 
@@ -73,7 +77,23 @@ final class ViewModel: ObservableObject, @unchecked Sendable {
 
         Task.detached { [weak self] in
             guard let self else { return }
-            await MainActor.run { self.updateDisplay() }
+            let found = NativeDDC.enumerateDisplays()
+            let hasDisplay = await MainActor.run {
+                self.displays = found
+                if !found.contains(where: { $0.index == self.selectedDisplayIndex }) {
+                    self.selectedDisplayIndex = found.first?.index ?? 0
+                }
+                self.ddc.invalidate()
+                guard !found.isEmpty else {
+                    self.statusMessage = "No displays found"
+                    self.isBusy = false
+                    return false
+                }
+                self.updateDisplay()
+                return true
+            }
+            guard hasDisplay else { return }
+
             let status = self.ctrl.getFullStatus()
             await MainActor.run {
                 self.applyStatus(status)
@@ -226,6 +246,18 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.2), value: vm.isBusy)
 
             Divider()
+
+            if let warning = vm.selectedDisplayWarning {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(warning)
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+            }
 
             // Bottom bar
             HStack(spacing: 12) {
